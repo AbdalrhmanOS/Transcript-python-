@@ -1,0 +1,372 @@
+#=======================transcript code==============================
+
+        # Generate and upload a bounded plain-text ticket transcript.
+        transcript_status = (
+            "Not uploaded because the summary thread was not created."
+        )
+
+        if summary_thread is not None:
+            try:
+                MAX_TRANSCRIPT_MESSAGES = 5000
+                MAX_TRANSCRIPT_BYTES = 1_000_000
+                MAX_MESSAGE_TEXT_CHARS = 5000
+
+                truncation_notice = (
+                    "\n\n[Transcript truncated for safety. "
+                    "Some messages may be omitted.]"
+                )
+
+                truncation_notice_bytes = len(
+                    truncation_notice.encode("utf-8")
+                )
+
+                def transcript_label(value, fallback="Unknown"):
+                    value = str(value or fallback)
+                    value = re.sub(r"[\r\n\t]+", " ", value)
+                    return value.strip() or fallback
+
+                def classify_attachment(attachment):
+                    content_type = (
+                        attachment.content_type or ""
+                    ).lower()
+
+                    filename = (
+                        attachment.filename or ""
+                    ).lower()
+
+                    extension = (
+                        filename.rsplit(".", 1)[-1]
+                        if "." in filename
+                        else ""
+                    )
+
+                    if (
+                        content_type.startswith("image/")
+                        or extension in {
+                            "png", "jpg", "jpeg", "gif",
+                            "webp", "bmp", "tif", "tiff",
+                            "avif", "heic"
+                        }
+                    ):
+                        return "image"
+
+                    if (
+                        content_type.startswith("video/")
+                        or extension in {
+                            "mp4", "mov", "webm", "mkv",
+                            "avi", "m4v", "mpeg", "mpg"
+                        }
+                    ):
+                        return "video"
+
+                    if (
+                        content_type.startswith("audio/")
+                        or extension in {
+                            "mp3", "wav", "ogg", "oga",
+                            "m4a", "flac", "aac", "opus"
+                        }
+                    ):
+                        return "audio"
+
+                    return "file"
+
+                def classify_embed_media(embed):
+                    embed_type = (
+                        getattr(embed, "type", "") or ""
+                    ).lower()
+
+                    video = getattr(
+                        getattr(embed, "video", None),
+                        "url",
+                        None
+                    )
+
+                    image = getattr(
+                        getattr(embed, "image", None),
+                        "url",
+                        None
+                    )
+
+                    thumbnail = getattr(
+                        getattr(embed, "thumbnail", None),
+                        "url",
+                        None
+                    )
+
+                    if embed_type in ("video", "gifv") or video:
+                        return "video"
+
+                    if embed_type == "image" or image or thumbnail:
+                        return "image"
+
+                    return None
+
+                # Header for the transcript.
+                header = "\n".join([
+                    "TICKET TRANSCRIPT",
+                    f"Ticket: {transcript_label(channel.name)}",
+                    (
+                        "Category: "
+                        f"{transcript_label(channel.category.name)}"
+                    ),
+                    f"Owner: {transcript_label(owner_name)}",
+                    "----------------------------------------",
+                    "",
+                    ""
+                ])
+
+                transcript_parts = [header]
+
+                used_bytes = len(header.encode("utf-8"))
+
+                content_byte_limit = (
+                    MAX_TRANSCRIPT_BYTES
+                    - truncation_notice_bytes
+                )
+
+                media_number = 0
+
+                transcript_truncated = (
+                    len(ticket_messages) > MAX_TRANSCRIPT_MESSAGES
+                )
+
+                # ticket_messages was fetched oldest first.
+                for message_index, message in enumerate(
+                    ticket_messages
+                ):
+                    if message_index >= MAX_TRANSCRIPT_MESSAGES:
+                        transcript_truncated = True
+                        break
+
+                    author = message.author
+
+                    author_name = transcript_label(
+                        getattr(author, "display_name", None)
+                        or getattr(author, "name", None),
+                        "Unknown member"
+                    )
+
+                    timestamp = message.created_at.strftime(
+                        "%Y-%m-%d %H:%M:%S UTC"
+                    )
+
+                    entry_lines = [
+                        f"[{timestamp}] {author_name}:"
+                    ]
+
+                    # Keep message content as plain text.
+                    message_content = message.content or ""
+
+                    if len(message_content) > MAX_MESSAGE_TEXT_CHARS:
+                        suffix = (
+                            "\n[Message text truncated for safety]"
+                        )
+                        message_content = (
+                            message_content[
+                                :MAX_MESSAGE_TEXT_CHARS - len(suffix)
+                            ]
+                            + suffix
+                        )
+
+                    if message_content:
+                        entry_lines.append(message_content)
+
+                    # Preserve textual embed information without
+                    # including embed URLs or media URLs.
+                    embed_text_parts = []
+
+                    for embed in message.embeds:
+                        if embed.title:
+                            embed_text_parts.append(
+                                f"Title: {embed.title}"
+                            )
+
+                        if embed.description:
+                            embed_text_parts.append(
+                                f"Description: {embed.description}"
+                            )
+
+                        for field in embed.fields:
+                            embed_text_parts.append(
+                                f"{field.name}: {field.value}"
+                            )
+
+                    remaining_text = max(
+                        0,
+                        MAX_MESSAGE_TEXT_CHARS - len(message_content)
+                    )
+
+                    if embed_text_parts and remaining_text > 0:
+                        embed_text = "\n".join(embed_text_parts)
+
+                        if len(embed_text) > remaining_text:
+                            suffix = "\n[Embed text truncated]"
+                            embed_text = (
+                                embed_text[
+                                    :max(
+                                        0,
+                                        remaining_text - len(suffix)
+                                    )
+                                ]
+                                + suffix
+                            )
+
+                        entry_lines.append("[Embed text]")
+                        entry_lines.append(embed_text)
+
+                    # URLs are used only internally to avoid counting
+                    # the same attached media twice. They are never
+                    # written into the transcript.
+                    attachment_urls = set()
+
+                    for attachment in message.attachments:
+                        for url_attribute in ("url", "proxy_url"):
+                            media_url = getattr(
+                                attachment,
+                                url_attribute,
+                                None
+                            )
+
+                            if media_url:
+                                attachment_urls.add(str(media_url))
+
+                        if attachment.filename:
+                            attachment_urls.add(
+                                f"attachment://{attachment.filename}"
+                            )
+
+                    # Give every attachment its own unique number,
+                    # including non-media files.
+                    for attachment in message.attachments:
+                        media_number += 1
+
+                        kind = classify_attachment(attachment)
+
+                        filename = transcript_label(
+                            attachment.filename,
+                            "unnamed attachment"
+                        )
+
+                        entry_lines.append(
+                            f"    ({author_name} sent "
+                            f"{kind} {media_number}: {filename})"
+                        )
+
+                    # Record embedded images/videos as placeholders.
+                    for embed in message.embeds:
+                        kind = classify_embed_media(embed)
+
+                        if kind is None:
+                            continue
+
+                        embed_media_urls = set()
+
+                        for media_attribute in (
+                            "image", "thumbnail", "video"
+                        ):
+                            media_url = getattr(
+                                getattr(
+                                    embed,
+                                    media_attribute,
+                                    None
+                                ),
+                                "url",
+                                None
+                            )
+
+                            if media_url:
+                                embed_media_urls.add(str(media_url))
+
+                        # Do not count an embed that represents an
+                        # attachment already listed above.
+                        if embed_media_urls & attachment_urls:
+                            continue
+
+                        media_number += 1
+
+                        entry_lines.append(
+                            f"    ({author_name} sent "
+                            f"{kind} {media_number}: embedded media)"
+                        )
+
+                    entry = "\n".join(entry_lines) + "\n\n"
+                    entry_bytes = len(entry.encode("utf-8"))
+
+                    # Leave room for a truncation notice in the file.
+                    if (
+                        used_bytes + entry_bytes
+                        > content_byte_limit
+                    ):
+                        transcript_truncated = True
+                        break
+
+                    transcript_parts.append(entry)
+                    used_bytes += entry_bytes
+
+                if transcript_truncated:
+                    transcript_parts.append(truncation_notice)
+
+                # Encode in memory. No local file is created.
+                transcript_bytes = "".join(
+                    transcript_parts
+                ).encode("utf-8")
+
+                safe_ticket_name = re.sub(
+                    r"[^A-Za-z0-9_-]+",
+                    "-",
+                    channel.name
+                ).strip("-") or "ticket"
+
+                transcript_filename = (
+                    f"{safe_ticket_name}-transcript.txt"
+                )
+
+                transcript_file = discord.File(
+                    io.BytesIO(transcript_bytes),
+                    filename=transcript_filename
+                )
+
+                await summary_thread.send(
+                    file=transcript_file,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+
+                transcript_status = (
+                    f"Uploaded to {summary_thread.mention}"
+                )
+
+            except discord.Forbidden:
+                transcript_status = (
+                    "Failed: the bot lacks permission to upload "
+                    "the transcript to the summary thread."
+                )
+
+                print(
+                    f"Permission denied while uploading the transcript "
+                    f"for ticket {channel.name}."
+                )
+
+            except discord.HTTPException as error:
+                transcript_status = (
+                    "Failed: Discord rejected the transcript upload."
+                )
+
+                print(
+                    f"Transcript upload failed for ticket "
+                    f"{channel.name}: {error}"
+                )
+
+            except Exception as error:
+                transcript_status = (
+                    "Failed while generating or uploading the transcript. "
+                    "See the bot console."
+                )
+
+                print(
+                    f"Transcript generation failed for ticket "
+                    f"{channel.name}: {error}"
+                )
+
+
+        #=======================transcript code==============================
+        #=========================================================================
